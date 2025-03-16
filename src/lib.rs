@@ -1,4 +1,4 @@
-use pam_sys::{PamHandle, PamReturnCode, PamFlag, PamItemType, wrapped::get_user};
+use pam_sys::{wrapped::{get_item, get_user}, PamFlag, PamHandle, PamItemType, PamMessageStyle, PamReturnCode};
 use user::ensure_user_exists;
 use std::ffi::{CStr, CString};
 use std::ptr;
@@ -41,7 +41,7 @@ fn parse_args(argc: libc::c_int, argv: *const *const libc::c_char) -> HashMap<St
 
 
 
-fn prompt_user(pamh: *mut PamHandle, prompt: &str, style: pam_sys::PamMessageStyle) -> Result<String, PamReturnCode> {
+fn prompt_user(pamh: *mut PamHandle, prompt: &str, style: PamMessageStyle) -> Result<String, PamReturnCode> {
     let c_prompt = CString::new(prompt).unwrap();
     
 
@@ -60,7 +60,7 @@ fn prompt_user(pamh: *mut PamHandle, prompt: &str, style: pam_sys::PamMessageSty
     // Get conversation function
     let mut conv_ptr: *const libc::c_void = ptr::null();
     let ret = unsafe {
-        pam_sys::get_item(
+        get_item(
             &*pamh, 
             PamItemType::CONV, 
             &mut conv_ptr
@@ -71,7 +71,6 @@ fn prompt_user(pamh: *mut PamHandle, prompt: &str, style: pam_sys::PamMessageSty
     let conv_ptr = conv_ptr as *const pam_sys::PamConversation;
     
     if ret != PamReturnCode::SUCCESS || conv_ptr.is_null() {
-        println!("Failed to get conversation function");
         return Err(PamReturnCode::CONV_ERR);
     }
     
@@ -86,7 +85,6 @@ fn prompt_user(pamh: *mut PamHandle, prompt: &str, style: pam_sys::PamMessageSty
                 conv.data_ptr
             ))
         } else {
-            println!("Conversation function is null");
             PamReturnCode::CONV_ERR
         };
 
@@ -97,22 +95,23 @@ fn prompt_user(pamh: *mut PamHandle, prompt: &str, style: pam_sys::PamMessageSty
     }
     
     if response_ptr.is_null() {
-        println!("Response pointer is null");
         return Err(PamReturnCode::CONV_ERR);
     }
 
     
-    if style == pam_sys::PamMessageStyle::PROMPT_ECHO_OFF || style == pam_sys::PamMessageStyle::PROMPT_ECHO_ON {
+    let response = if style == PamMessageStyle::PROMPT_ECHO_OFF || style == PamMessageStyle::PROMPT_ECHO_ON {
         let resp_ptr = unsafe { (*response_ptr).resp };
-        let response = unsafe { CStr::from_ptr(resp_ptr) }
+        let r = unsafe { CStr::from_ptr(resp_ptr) }
             .to_string_lossy()
             .into_owned();
-        
-        unsafe { libc::free(response_ptr as *mut libc::c_void) };
-        return Ok(response);
-    } 
+        unsafe { libc::free(resp_ptr as *mut libc::c_void) };
+        r
+    } else {
+        "".to_string()
+    };
+    unsafe { libc::free(response_ptr as *mut libc::c_void) };
     
-    Ok("".to_string())
+    Ok(response)
 }
 
 
@@ -191,7 +190,7 @@ pub extern "C" fn pam_sm_authenticate(
     );
 
 
-    let _ = match prompt_user(pamh, &prompt, pam_sys::PamMessageStyle::PROMPT_ECHO_OFF) {
+    let _ = match prompt_user(pamh, &prompt, PamMessageStyle::PROMPT_ECHO_OFF) {
         Ok(resp) => resp,
         Err(err) => {
             logging::log_to_file(&format!("Failed to prompt user: {:?}", err));
@@ -210,7 +209,7 @@ pub extern "C" fn pam_sm_authenticate(
             match err {
                 github::GithubError::NotFound => {
                     logging::log_to_file("User not found in organization");
-                    let _ = prompt_user(pamh, "User not found in organization", pam_sys::PamMessageStyle::TEXT_INFO);
+                    let _ = prompt_user(pamh, "User not found in organization", PamMessageStyle::TEXT_INFO);
                     return PamReturnCode::USER_UNKNOWN;
                 }
                 github::GithubError::InvalidUser(info) => {
@@ -219,7 +218,7 @@ pub extern "C" fn pam_sm_authenticate(
                 }
                 github::GithubError::Unauthorized => {
                     logging::log_to_file("Unauthorized access");
-                    let _ = prompt_user(pamh, "Unauthorized access", pam_sys::PamMessageStyle::TEXT_INFO);
+                    let _ = prompt_user(pamh, "Unauthorized access", PamMessageStyle::TEXT_INFO);
                     return PamReturnCode::USER_UNKNOWN;
                 }
                 _ => {
@@ -253,12 +252,12 @@ pub extern "C" fn pam_sm_authenticate(
         }
         if !team_found {
             logging::log_to_file("User is not a member of the required team");
-            let _ = prompt_user(pamh, "User is not a member of the required team", pam_sys::PamMessageStyle::TEXT_INFO);
+            let _ = prompt_user(pamh, "User is not a member of the required team", PamMessageStyle::TEXT_INFO);
             return PamReturnCode::USER_UNKNOWN;
         }
     }
 
-    let _ = match prompt_user(pamh, "Authentication successful", pam_sys::PamMessageStyle::TEXT_INFO) {
+    let _ = match prompt_user(pamh, "Authentication successful", PamMessageStyle::TEXT_INFO) {
         Ok(_) => {},
         Err(err) => {
             logging::log_to_file(&format!("Failed to prompt user: {:?}", err));
@@ -275,18 +274,13 @@ pub extern "C" fn pam_sm_authenticate(
                     logging::log_to_file(&format!("User {} already exists", username));
                 } else {
                     logging::log_to_file(&format!("Created user {}", username));
-                    // When a user is newly created during auth, SSH may still reject the connection
-                    // because it checked user existence before PAM authentication.
-                    // Instruct the user to try again now that their account exists.
-                    let message = "Your account has been created successfully!\n\
-                                  However, for technical reasons with SSH, you need to disconnect\n\
-                                  and log in again for your new account to be recognized.\n\
-                                  Please reconnect using the same credentials.";
-                    let _ = prompt_user(pamh, message, pam_sys::PamMessageStyle::TEXT_INFO);
                     
-                    // We need to return SUCCESS so PAM authentication passes,
-                    // but SSH will still typically reject due to the user check it performed earlier
-                    return PamReturnCode::USER_UNKNOWN;
+                    // Prompt user about account creation
+                    let message = "Your account has been created successfully!\n\
+                                  After this session, you'll need to disconnect and log in again for your new account to be fully recognized.";
+                    let _ = prompt_user(pamh, message, PamMessageStyle::TEXT_INFO);
+                    
+                    return PamReturnCode::SUCCESS;
                 }
             },
             Err(err) => {
@@ -300,7 +294,7 @@ pub extern "C" fn pam_sm_authenticate(
         let ans = prompt_user(
             pamh,
             "Do you want to import your SSH keys from GitHub? (y/n) ",
-            pam_sys::PamMessageStyle::PROMPT_ECHO_ON,
+            PamMessageStyle::PROMPT_ECHO_ON,
         );
         if let Err(err) = ans {
             logging::log_to_file(&format!("Failed to prompt user: {:?}", err));
@@ -308,7 +302,7 @@ pub extern "C" fn pam_sm_authenticate(
         }
         let ans = ans.unwrap();
         let ans = ans.trim().to_lowercase();
-        if ans.trim().to_lowercase() != "y" {
+        if ans != "y" {
             logging::log_to_file("User declined to import keys");
             return PamReturnCode::SUCCESS;
         }
