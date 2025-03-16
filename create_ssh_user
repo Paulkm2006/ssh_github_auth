@@ -1,0 +1,28 @@
+#!/bin/bash
+# /usr/local/bin/create_ssh_user
+
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <username> [add_sudo]"
+    exit 1
+fi
+
+USERNAME="$1"
+ADD_SUDO="$2"
+
+# Create the user
+useradd -m -s /bin/bash "$USERNAME" || exit $?
+
+# Set up SSH directory
+mkdir -p /home/$USERNAME/.ssh
+touch /home/$USERNAME/.ssh/authorized_keys
+chmod 700 /home/$USERNAME/.ssh
+chmod 600 /home/$USERNAME/.ssh/authorized_keys
+chown -R $USERNAME:$USERNAME /home/$USERNAME
+
+# Add to sudoers if requested
+if [ "$ADD_SUDO" = "true" ]; then
+    echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME
+    chmod 440 /etc/sudoers.d/$USERNAME
+fi
+
+exit 0

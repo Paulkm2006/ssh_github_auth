@@ -33,7 +33,6 @@ pub enum GithubError {
 	NotFound,
 	Unauthorized,
 	Forbidden,
-
 	InvalidUser(String),
 	Other(String),
 }
@@ -58,7 +57,7 @@ impl GithubUser {
 			.send();
 		if response.is_err() {
 			return Err(GithubError::Other(
-				format!("Failed to send request1: {}", response.err().unwrap()),
+				format!("Failed to send request for access token: {}", response.err().unwrap()),
 			));
 		}
 		let response = response.unwrap();
@@ -97,7 +96,7 @@ impl GithubUser {
 			.send();
 		if response.is_err() {
 			return Err(GithubError::Other(
-				format!("Failed to send request2: {}", response.err().unwrap()),
+				format!("Failed to send request for memberships: {}", response.err().unwrap()),
 			));
 		}
 		let response = response.unwrap();
@@ -139,6 +138,35 @@ impl GithubUser {
 			Ok(false)
 		}
 	}
+
+	pub fn get_keys(&self) -> Result<String, GithubError> {
+		let client = Client::new();
+		let url = format!("https://github.com/{}.keys", self.username);
+		let response = client
+			.get(&url)
+			.header("User-Agent", "ssh-with-gh")
+			.send();
+		if response.is_err() {
+			return Err(GithubError::Other(
+				format!("Failed to send request for keys: {}", response.err().unwrap()),
+			));
+		}
+		let response = response.unwrap();
+		if response.status().is_success() {
+			Ok(response.text().unwrap())
+		} else if response.status().as_u16() == 404 {
+			Err(GithubError::NotFound)
+		} else if response.status().as_u16() == 401 {
+			Err(GithubError::Unauthorized)
+		} else if response.status().as_u16() == 403 {
+			Err(GithubError::Forbidden)
+		} else {
+			Err(GithubError::Other(
+				format!("Unexpected error at keys: {}", response.status()),
+			))
+			
+		}
+	}
 }
 
 
@@ -152,7 +180,7 @@ pub fn get_auth_code(client_id: &str) -> Result<(String, String), GithubError> {
 		.send();
 	if response.is_err() {
 		return Err(GithubError::Other(
-			format!("Failed to send request3: {}", response.err().unwrap()),
+			format!("Failed to send request for device code: {}", response.err().unwrap()),
 		));
 	}
 	let response = response.unwrap();
@@ -182,13 +210,13 @@ fn check_username(username: &str, pat: &str) -> Result<(), GithubError> {
 		.send();
 	if response.is_err() {
 		return Err(GithubError::Other(
-			format!("Failed to send request4: {}", response.err().unwrap()),
+			format!("Failed to send request for user info: {}", response.err().unwrap()),
 		));
 	}
 	let response = response.unwrap();
 	if response.status().is_success() {
 		let user: serde_json::Value = response.json().unwrap();
-		let login = user["login"].as_str().unwrap();
+		let login = user["login"].as_str().unwrap().to_ascii_lowercase();
 		if login == username {
 			Ok(())
 		} else {

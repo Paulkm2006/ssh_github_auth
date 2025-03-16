@@ -1,16 +1,15 @@
 use pam_sys::{PamHandle, PamReturnCode, PamFlag, PamItemType, wrapped::get_user};
+use user::ensure_user_exists;
 use std::ffi::{CStr, CString};
 use std::ptr;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::collections::HashMap;
 use libc;
 
 pub mod github;
+pub mod user;
+pub mod logging;
 
 
-use std::collections::HashMap;
-
-// Parse arguments into a HashMap for easy access
 fn parse_args(argc: libc::c_int, argv: *const *const libc::c_char) -> HashMap<String, String> {
     let mut args_map = HashMap::new();
     let mut flags = Vec::new();
@@ -41,92 +40,85 @@ fn parse_args(argc: libc::c_int, argv: *const *const libc::c_char) -> HashMap<St
 }
 
 
-// Helper function to prompt for input
-fn prompt_user(pamh: *mut PamHandle, prompt: &str, echo: bool) -> Result<String, PamReturnCode> {
-    let response_ptr: *const libc::c_char;
+
+fn prompt_user(pamh: *mut PamHandle, prompt: &str, style: pam_sys::PamMessageStyle) -> Result<String, PamReturnCode> {
     let c_prompt = CString::new(prompt).unwrap();
     
-    // Style parameter for conversation
-    let style = match echo{
-        true => pam_sys::PamMessageStyle::PROMPT_ECHO_ON,
-        false => pam_sys::PamMessageStyle::PROMPT_ECHO_OFF,
+
+    // Create message structure
+    let msg = pam_sys::PamMessage {
+        msg_style: style as i32,
+        msg: c_prompt.as_ptr(),
     };
     
+    // Create pointer to message
+    let pmsg = [&msg as *const pam_sys::PamMessage];
+    
+    // Prepare response pointer
+    let mut response_ptr: *mut pam_sys::PamResponse = ptr::null_mut();
+    
+    // Get conversation function
+    let mut conv_ptr: *const libc::c_void = ptr::null();
     let ret = unsafe {
-        // Get conversation function
-        let conv_ptr: *const pam_sys::PamConversation = ptr::null();
-        let status = pam_sys::get_item(
-            &*pamh,
-            PamItemType::CONV,
-            &mut (conv_ptr as *const libc::c_void),
-        );
-        
-        if status != PamReturnCode::SUCCESS || conv_ptr.is_null() {
-            return Err(PamReturnCode::CONV_ERR);
-        }
-        
-        // Create message
-        let msg = pam_sys::PamMessage {
-            msg_style: style as i32,
-            msg: c_prompt.as_ptr(),
-        };
-        
-        let msgs = vec![&msg as *const pam_sys::PamMessage];
-        let mut resp: *mut pam_sys::PamResponse = ptr::null_mut();
-        
-        // Call conversation function
-        let conv_fn = (*conv_ptr).conv.expect("Conversation function is null");
-        let conv_data = (*conv_ptr).data_ptr;
-        
-        let status_i32 = conv_fn(
-            1,
-            msgs.as_ptr() as *mut *mut pam_sys::PamMessage,
-            &mut resp,
-            conv_data,
-        );
-        
-        if PamReturnCode::from(status_i32) != PamReturnCode::SUCCESS || resp.is_null() {
-            return Err(PamReturnCode::CONV_ERR);
-        }
-        
-        // Get response
-        response_ptr = (*resp).resp;
-        status
+        pam_sys::get_item(
+            &*pamh, 
+            PamItemType::CONV, 
+            &mut conv_ptr
+        )
     };
+
+    // After get_item completes, cast to the right type
+    let conv_ptr = conv_ptr as *const pam_sys::PamConversation;
     
+    if ret != PamReturnCode::SUCCESS || conv_ptr.is_null() {
+        println!("Failed to get conversation function");
+        return Err(PamReturnCode::CONV_ERR);
+    }
+    
+    // Call conversation function
+    let conv = unsafe { &*conv_ptr };
+    let ret = 
+        if let Some(conv_fn) = conv.conv {
+            PamReturnCode::from(conv_fn(
+                1,
+                pmsg.as_ptr() as *mut *mut pam_sys::PamMessage,
+                &mut response_ptr as *mut *mut pam_sys::PamResponse,
+                conv.data_ptr
+            ))
+        } else {
+            println!("Conversation function is null");
+            PamReturnCode::CONV_ERR
+        };
+
+
+
     if ret != PamReturnCode::SUCCESS {
         return Err(ret);
     }
     
     if response_ptr.is_null() {
+        println!("Response pointer is null");
         return Err(PamReturnCode::CONV_ERR);
     }
+
     
-    let response = unsafe { CStr::from_ptr(response_ptr) }
-        .to_string_lossy()
-        .into_owned();
+    if style == pam_sys::PamMessageStyle::PROMPT_ECHO_OFF || style == pam_sys::PamMessageStyle::PROMPT_ECHO_ON {
+        let resp_ptr = unsafe { (*response_ptr).resp };
+        let response = unsafe { CStr::from_ptr(resp_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        
+        unsafe { libc::free(response_ptr as *mut libc::c_void) };
+        return Ok(response);
+    } 
     
-    // Free the response memory allocated by PAM
-    unsafe { libc::free(response_ptr as *mut libc::c_void) };
-    
-    Ok(response)
+    Ok("".to_string())
 }
 
-// Optional: Log to a file for debugging
-fn log_to_file(message: &str) {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/github_ssh.log")
-        .unwrap_or_else(|_| panic!("Failed to open log file"));
-    
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    writeln!(file, "[{}] {}", timestamp, message)
-        .unwrap_or_else(|_| panic!("Failed to write to log file"));
-}
 
-// PAM authentication function
+
 #[unsafe(no_mangle)]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn pam_sm_authenticate(
     pamh: *mut PamHandle,
     _flags: PamFlag,
@@ -140,17 +132,31 @@ pub extern "C" fn pam_sm_authenticate(
     let org = match args.get("org") {
         Some(org) => org,
         None => {
-            log_to_file("Missing organization name");
+            logging::log_to_file("Missing organization name");
             return PamReturnCode::SERVICE_ERR;
         }
     };
     let client_id = match args.get("client_id") {
         Some(client_id) => client_id,
         None => {
-            log_to_file("Missing client ID");
+            logging::log_to_file("Missing client ID");
             return PamReturnCode::SERVICE_ERR;
         }
     };
+    let auto_create_user = args.contains_key("auto_create_user");
+    let auto_create_user_sudoer = if auto_create_user {
+        match args.get("auto_create_user") {
+            Some(sudoer) => match sudoer.as_str() {
+                "sudoer" => true,
+                _ => false
+
+            },
+            None => false
+        }
+    } else {
+        false
+    };
+    let allow_import_keys = args.contains_key("allow_import_keys");
 
     // Get username
     let mut user = ptr::null();
@@ -160,18 +166,18 @@ pub extern "C" fn pam_sm_authenticate(
             username_cstr.to_string_lossy().into_owned()
         },
         code => {
-            log_to_file(&format!("Failed to get username: {:?}", code));
+            logging::log_to_file(&format!("Failed to get username: {:?}", code));
             return code;
         }
-    };
+    }.to_ascii_lowercase();
 
-    log_to_file(&format!("Authentication request for username: {}", username));
+    logging::log_to_file(&format!("Authentication request for username: {}", username));
 
     // Prompt for device auth
     let (device_code, user_code) = match github::get_auth_code(&client_id) {
         Ok(code) => code,
         Err(err) => {
-            log_to_file(&format!("Failed to get device code: {:?}", err));
+            logging::log_to_file(&format!("Failed to get device code: {:?}", err));
             return PamReturnCode::SERVICE_ERR;
         }
     };
@@ -183,9 +189,18 @@ pub extern "C" fn pam_sm_authenticate(
         \nAfter a successful login, press Enter to continue...",
         user_code
     );
-    println!("\n{}", prompt);
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
+
+
+    let _ = match prompt_user(pamh, &prompt, pam_sys::PamMessageStyle::PROMPT_ECHO_OFF) {
+        Ok(resp) => resp,
+        Err(err) => {
+            logging::log_to_file(&format!("Failed to prompt user: {:?}", err));
+            return PamReturnCode::SERVICE_ERR;
+        }
+    };
+
+
+
     let device_code = device_code.trim().to_string();
 
     // Retrieve user info
@@ -194,15 +209,21 @@ pub extern "C" fn pam_sm_authenticate(
         Err(err) => {
             match err {
                 github::GithubError::NotFound => {
-                    log_to_file("User not found in organization");
+                    logging::log_to_file("User not found in organization");
+                    let _ = prompt_user(pamh, "User not found in organization", pam_sys::PamMessageStyle::ERROR_MSG);
                     return PamReturnCode::USER_UNKNOWN;
                 }
                 github::GithubError::InvalidUser(info) => {
-                    log_to_file(&format!("Invalid user: {:?}", info));
+                    logging::log_to_file(&format!("Invalid user: {:?}", info));
+                    return PamReturnCode::USER_UNKNOWN;
+                }
+                github::GithubError::Unauthorized => {
+                    logging::log_to_file("Unauthorized access");
+                    let _ = prompt_user(pamh, "Unauthorized access", pam_sys::PamMessageStyle::ERROR_MSG);
                     return PamReturnCode::USER_UNKNOWN;
                 }
                 _ => {
-                    log_to_file(&format!("Unexpected error: {:?}", err));
+                    logging::log_to_file(&format!("Unexpected error: {:?}", err));
                     return PamReturnCode::SERVICE_ERR;
                 }
             }
@@ -214,23 +235,82 @@ pub extern "C" fn pam_sm_authenticate(
         let is_in_team = match github_user.is_in_team(team) {
             Ok(in_team) => in_team,
             Err(err) => {
-                log_to_file(&format!("Failed to check team membership: {:?}", err));
+                logging::log_to_file(&format!("Failed to check team membership: {:?}", err));
                 return PamReturnCode::SERVICE_ERR;
             }
         };
         if !is_in_team {
-            log_to_file("User is not in the specified team");
+            let _ = prompt_user(pamh, "User is not in the specified team", pam_sys::PamMessageStyle::ERROR_MSG);
+            logging::log_to_file("User is not in the specified team");
             return PamReturnCode::USER_UNKNOWN;
         }
     }
-    
 
-    log_to_file(&format!("Authentication successful for user {}", username));
+    let _ = match prompt_user(pamh, "Authentication successful", pam_sys::PamMessageStyle::TEXT_INFO) {
+        Ok(_) => {},
+        Err(err) => {
+            logging::log_to_file(&format!("Failed to prompt user: {:?}", err));
+            return PamReturnCode::SERVICE_ERR;
+        }
+    };
+    logging::log_to_file(&format!("Authentication successful for user {}", username));
+
+
+    if auto_create_user {
+        match ensure_user_exists(&username, auto_create_user_sudoer) {
+            Ok(existed) => {
+                if existed {
+                    logging::log_to_file(&format!("User {} already exists", username));
+                } else {
+                    logging::log_to_file(&format!("Created user {}", username));
+                }
+            },
+            Err(err) => {
+                logging::log_to_file(&format!("Failed to create user: {}", err));
+                return PamReturnCode::SERVICE_ERR;
+            }
+        }
+    }
+
+    if allow_import_keys {
+        let ans = prompt_user(
+            pamh,
+            "Do you want to import your SSH keys from GitHub? (y/n) ",
+            pam_sys::PamMessageStyle::PROMPT_ECHO_ON,
+        );
+        if let Err(err) = ans {
+            logging::log_to_file(&format!("Failed to prompt user: {:?}", err));
+            return PamReturnCode::SERVICE_ERR;
+        }
+        let ans = ans.unwrap();
+        let ans = ans.trim().to_lowercase();
+        if ans.trim().to_lowercase() != "y" {
+            logging::log_to_file("User declined to import keys");
+            return PamReturnCode::SUCCESS;
+        }
+        logging::log_to_file("User accepted to import keys");
+        match github_user.get_keys() {
+            Ok(_) => {
+                let keys = github_user.get_keys().unwrap();
+                if let Err(e) = user::add_authorized_key(&username, &keys) {
+                    logging::log_to_file(&format!("Failed to import keys: {}", e));
+                    return PamReturnCode::SERVICE_ERR;
+                }
+                logging::log_to_file(&format!("Imported keys for user {}", username));
+            },
+            Err(err) => {
+                logging::log_to_file(&format!("Failed to import keys: {:?}", err));
+                return PamReturnCode::SERVICE_ERR;
+            }
+        }
+    }
+
     PamReturnCode::SUCCESS
 }
 
 
-// Required PAM functions that we need to implement
+
+#[allow(improper_ctypes_definitions)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pam_sm_setcred(
     _pamh: *mut PamHandle,
@@ -242,6 +322,7 @@ pub extern "C" fn pam_sm_setcred(
 }
 
 #[unsafe(no_mangle)]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn pam_sm_acct_mgmt(
     _pamh: *mut PamHandle,
     _flags: PamFlag,
@@ -252,6 +333,7 @@ pub extern "C" fn pam_sm_acct_mgmt(
 }
 
 #[unsafe(no_mangle)]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn pam_sm_open_session(
     _pamh: *mut PamHandle,
     _flags: PamFlag,
@@ -262,6 +344,7 @@ pub extern "C" fn pam_sm_open_session(
 }
 
 #[unsafe(no_mangle)]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn pam_sm_close_session(
     _pamh: *mut PamHandle,
     _flags: PamFlag,
@@ -272,6 +355,7 @@ pub extern "C" fn pam_sm_close_session(
 }
 
 #[unsafe(no_mangle)]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn pam_sm_chauthtok(
     _pamh: *mut PamHandle,
     _flags: PamFlag,
