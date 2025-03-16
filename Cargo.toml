@@ -1,0 +1,16 @@
+[package]
+name = "ssh_github_auth"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ssh_github_auth"
+crate-type = ["cdylib"]
+
+[dependencies]
+chrono = "0.4"
+libc = "0.2"
+pam-sys = "0.5"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
