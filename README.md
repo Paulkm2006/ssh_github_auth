@@ -16,7 +16,7 @@ The parameters specifications are in this table
 |------------|----------|-------------|
 | client_id | true | client_id for your Github App|
 | org | true | Your organization's name |
-| team | false | The team name of authorized users |
+| team | false | The team name of authorized users, split with `,` |
 | auto_create_user | false | When specified with value `sudoer`, the program automatically add the user into sudoers file |
 | allow_import_keys | false | Whether the users can choose to import their ssh keys into `authorized_keys` or not |
 

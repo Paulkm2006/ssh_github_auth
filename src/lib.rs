@@ -210,7 +210,7 @@ pub extern "C" fn pam_sm_authenticate(
             match err {
                 github::GithubError::NotFound => {
                     logging::log_to_file("User not found in organization");
-                    let _ = prompt_user(pamh, "User not found in organization", pam_sys::PamMessageStyle::ERROR_MSG);
+                    let _ = prompt_user(pamh, "User not found in organization", pam_sys::PamMessageStyle::TEXT_INFO);
                     return PamReturnCode::USER_UNKNOWN;
                 }
                 github::GithubError::InvalidUser(info) => {
@@ -219,7 +219,7 @@ pub extern "C" fn pam_sm_authenticate(
                 }
                 github::GithubError::Unauthorized => {
                     logging::log_to_file("Unauthorized access");
-                    let _ = prompt_user(pamh, "Unauthorized access", pam_sys::PamMessageStyle::ERROR_MSG);
+                    let _ = prompt_user(pamh, "Unauthorized access", pam_sys::PamMessageStyle::TEXT_INFO);
                     return PamReturnCode::USER_UNKNOWN;
                 }
                 _ => {
@@ -232,16 +232,28 @@ pub extern "C" fn pam_sm_authenticate(
 
 
     if let Some(team) = args.get("team") {
-        let is_in_team = match github_user.is_in_team(team) {
-            Ok(in_team) => in_team,
-            Err(err) => {
-                logging::log_to_file(&format!("Failed to check team membership: {:?}", err));
-                return PamReturnCode::SERVICE_ERR;
+        let it = team.split(',');
+        let mut team_found = false;
+        for t in it {
+            let team = t.trim();
+            if team.is_empty() {
+                continue;
             }
-        };
-        if !is_in_team {
-            let _ = prompt_user(pamh, "User is not in the specified team", pam_sys::PamMessageStyle::ERROR_MSG);
-            logging::log_to_file("User is not in the specified team");
+            logging::log_to_file(&format!("Checking team membership for team: {}", team));
+            match github_user.is_in_team(team) {
+                Ok(in_team) => if in_team {
+                    team_found = true;
+                    break;
+                }
+                Err(err) => {
+                    logging::log_to_file(&format!("Failed to check team membership: {:?}", err));
+                    return PamReturnCode::SERVICE_ERR;
+                }
+            };
+        }
+        if !team_found {
+            logging::log_to_file("User is not a member of the required team");
+            let _ = prompt_user(pamh, "User is not a member of the required team", pam_sys::PamMessageStyle::TEXT_INFO);
             return PamReturnCode::USER_UNKNOWN;
         }
     }
