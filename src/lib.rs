@@ -156,6 +156,17 @@ pub extern "C" fn pam_sm_authenticate(
         false
     };
     let allow_import_keys = args.contains_key("");
+    let always_import_keys = if allow_import_keys {
+        match args.get("allow_import_keys") {
+            Some(allow) => match allow.as_str() {
+                "always" => true,
+                _ => false
+            },
+            None => false
+        }
+    } else {
+        false
+    };
 
     // Get username
     let mut user = ptr::null();
@@ -280,6 +291,25 @@ pub extern "C" fn pam_sm_authenticate(
                                   After this session, you'll need to disconnect and log in again for your new account to be fully recognized.";
                     let _ = prompt_user(pamh, message, PamMessageStyle::TEXT_INFO);
                     
+                    if always_import_keys {
+                        match github_user.get_keys() {
+                            Ok(_) => {
+                                let keys = github_user.get_keys().unwrap();
+                                if let Err(e) = user::add_authorized_key(&username, &keys) {
+                                    logging::log_to_file(&format!("Failed to import keys: {}", e));
+                                    return PamReturnCode::SERVICE_ERR;
+                                }
+                                let message = "Your SSH keys have been imported successfully!";
+                                let _ = prompt_user(pamh, message, PamMessageStyle::TEXT_INFO);
+                                logging::log_to_file(&format!("Imported keys for user {}", username));
+                            },
+                            Err(err) => {
+                                logging::log_to_file(&format!("Failed to import keys: {:?}", err));
+                                return PamReturnCode::SERVICE_ERR;
+                            }
+                        }
+                    }
+
                     return PamReturnCode::SUCCESS;
                 }
             },
@@ -314,6 +344,8 @@ pub extern "C" fn pam_sm_authenticate(
                     logging::log_to_file(&format!("Failed to import keys: {}", e));
                     return PamReturnCode::SERVICE_ERR;
                 }
+                let message = "Your SSH keys have been imported successfully!";
+                let _ = prompt_user(pamh, message, PamMessageStyle::TEXT_INFO);
                 logging::log_to_file(&format!("Imported keys for user {}", username));
             },
             Err(err) => {
