@@ -130,6 +130,7 @@ impl GithubUser {
 		);
 		let response = client
 			.get(&url)
+			.header("User-Agent", "ssh-with-gh")
 			.header("Authorization", format!("Bearer {}", self.pat))
 			.send()?;
 		if response.status().is_success() {
