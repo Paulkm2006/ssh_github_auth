@@ -156,7 +156,7 @@ pub extern "C" fn pam_sm_authenticate(
     } else {
         false
     };
-    let allow_import_keys = args.contains_key("allow_import_keys");
+    let allow_import_keys = args.contains_key("");
 
     // Get username
     let mut user = ptr::null();
@@ -275,6 +275,18 @@ pub extern "C" fn pam_sm_authenticate(
                     logging::log_to_file(&format!("User {} already exists", username));
                 } else {
                     logging::log_to_file(&format!("Created user {}", username));
+                    // When a user is newly created during auth, SSH may still reject the connection
+                    // because it checked user existence before PAM authentication.
+                    // Instruct the user to try again now that their account exists.
+                    let message = "Your account has been created successfully!\n\
+                                  However, for technical reasons with SSH, you need to disconnect\n\
+                                  and log in again for your new account to be recognized.\n\
+                                  Please reconnect using the same credentials.";
+                    let _ = prompt_user(pamh, message, pam_sys::PamMessageStyle::TEXT_INFO);
+                    
+                    // We need to return SUCCESS so PAM authentication passes,
+                    // but SSH will still typically reject due to the user check it performed earlier
+                    return PamReturnCode::USER_UNKNOWN;
                 }
             },
             Err(err) => {

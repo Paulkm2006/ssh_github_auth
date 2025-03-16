@@ -4,6 +4,9 @@
 This module implements PAM authentication to support interactive auth using Github device login.
 You can allow users in a specific organization (and in a specific team) to access the SSH server, create an account for them and ask them whether to save their Github public keys into `authorized_keys` for further logins.
 
+### Problems:
+#### 1. Since SSH checks whether a user exists before calling PAM, the first login for a user will always fail. Possible workarounds are allowing users to add their ssh public keys (so that they won't need to auth over Github again), or let prompt the user to reconnect.
+
 ### Usage:
 #### 1. Create a Github App 
 Navigate to [here](https://github.com/settings/apps/new). Remember to check the `Enable Device Flow` option and grant the permission `Organization-Members-Read only`
