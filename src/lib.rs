@@ -155,7 +155,7 @@ pub extern "C" fn pam_sm_authenticate(
     } else {
         false
     };
-    let allow_import_keys = args.contains_key("");
+    let allow_import_keys = args.contains_key("allow_import_keys");
     let always_import_keys = if allow_import_keys {
         match args.get("allow_import_keys") {
             Some(allow) => match allow.as_str() {
